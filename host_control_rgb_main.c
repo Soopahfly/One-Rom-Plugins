@@ -48,24 +48,7 @@ ORA_DEFINE_USER_PLUGIN(
 
 #define NEOPIXEL_PIN        24u     // Bank select pad A
 
-#define SIO_BASE            0xD0000000u
-#define SIO_GPIO_OUT_SET    (*(volatile uint32_t *)(SIO_BASE + 0x018u))
-#define SIO_GPIO_OUT_CLR    (*(volatile uint32_t *)(SIO_BASE + 0x020u))
-#define SIO_GPIO_OE_SET     (*(volatile uint32_t *)(SIO_BASE + 0x038u))
-#define SIO_GPIO_OE_CLR     (*(volatile uint32_t *)(SIO_BASE + 0x040u))
-#define IO_BANK0_BASE       0x40028000u
-#define GPIO_CTRL(n)        (*(volatile uint32_t *)(IO_BANK0_BASE + (uint32_t)(n) * 8u + 4u))
 #define FUNCSEL_SIO         5u
-#define PADS_BANK0_BASE     0x40038000u
-#define PAD_OFFSET_START    0x004u
-#define PAD_SPACING         0x004u
-#define GPIO_PAD(pin)       (*(volatile uint32_t*)(PADS_BANK0_BASE + PAD_OFFSET_START + (pin)*PAD_SPACING))
-#define PAD_DRIVE_BIT       4u
-#define PAD_DRIVE_8MA       0x2u
-#define PAD_DRIVE_MASK      0x3u
-#define PAD_DRIVE(X)        (((X) & PAD_DRIVE_MASK) << PAD_DRIVE_BIT)
-#define PAD_SLEW_FAST_BIT   0u
-#define PAD_SLEW_FAST       (1u << PAD_SLEW_FAST_BIT)
 
 // WS2812/SK6812 pulse widths in nanoseconds
 #define T0H_NS  350u
