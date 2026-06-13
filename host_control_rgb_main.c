@@ -163,13 +163,16 @@ static void neopixel_init(uint32_t sysclk_mhz) {
     s_np_pin_mask = 1u << NEOPIXEL_PIN;
 
     // Configure GPIO24 pad: SIO function, 8mA drive, fast slew.
-    // Note: output enable is NOT set here. The pin is only driven during
-    // each transmission (see neopixel_show_flash_slot) and is tri-stated
-    // the rest of the time, so the bank select jumper read on a warm
-    // reboot is unaffected.
+    // The pin is driven as a permanent output, idle LOW. A WS2812/SK6812
+    // DIN must be held at a defined level between updates - if the line is
+    // left floating (e.g. by tri-stating this pin) it drifts to the input
+    // threshold of the 74AHCT125 level shifter (~1.5V), whose output then
+    // oscillates and feeds noise to the LED, causing flicker. Holding the
+    // pin low keeps the shifter output low so the LED holds its colour.
     GPIO_PAD(NEOPIXEL_PIN) = PAD_DRIVE(PAD_DRIVE_8MA) | PAD_SLEW_FAST;
     GPIO_CTRL(NEOPIXEL_PIN) = FUNCSEL_SIO;
     SIO_GPIO_OUT_CLR = s_np_pin_mask;
+    SIO_GPIO_OE_SET  = s_np_pin_mask;
 }
 
 static void neopixel_show_flash_slot(uint8_t flash_slot) {
@@ -186,16 +189,14 @@ static void neopixel_show_flash_slot(uint8_t flash_slot) {
         r = 16; g = 16; b = 16;
     }
 
-    // Claim the pin only for the duration of the transmission, then release
-    // it back to input. The NeoPixel latches its colour after the reset
-    // pulse, and the firmware's jumper pull holds the idle level, so a warm
-    // reboot reads bank select pad A exactly as if nothing were attached.
+    // The pin is already a permanent output (see neopixel_init); keep it
+    // driven throughout and leave it idle LOW afterwards so the level
+    // shifter input has a defined level and the NeoPixel holds its colour.
     SIO_GPIO_OUT_CLR = s_np_pin_mask;
-    SIO_GPIO_OE_SET  = s_np_pin_mask;
     np_reset();
     np_send_pixel(r, g, b);
     np_reset();                       // latch the colour
-    SIO_GPIO_OE_CLR = s_np_pin_mask;  // tri-state: hands the pad back
+    SIO_GPIO_OUT_CLR = s_np_pin_mask; // idle low - hold the line stable
 }
 
 // Translate a RAM slot to its last-loaded flash slot and show that colour
