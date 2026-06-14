@@ -123,7 +123,7 @@ static const uint8_t s_palette[PALETTE_SIZE][3] = {
     {  0, 255, 255},   // Flash 5  - Cyan
     {  0,   0, 255},   // Flash 6  - Blue
     {128,   0, 255},   // Flash 7  - Purple
-    {255, 255, 255},   // Flash 8  - White
+    {255,  32,  96},   // Flash 8  - Rose
     {255,   0, 128},   // Flash 9  - Pink
     {255,  64,   0},   // Flash 10 - Amber
     {  0, 128, 255},   // Flash 11 - Sky Blue

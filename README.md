@@ -28,6 +28,7 @@ other core while the user plugin bit-bangs the LED.
 | 4 | EXOS | green |
 | 5 | jiffy_dolphin | cyan |
 | 6 | destest | blue |
+| 8 | additional kernal | rose |
 
 ## Wiring
 
