@@ -4,18 +4,29 @@
 // MIT License
 //
 // RBCP (ROM Bus Control Protocol) device-side plugin for One ROM,
-// with NeoPixel slot colour indicator on GPIO24 (bank select pad A).
+// with a NeoPixel slot-colour indicator driven from a bank-select (SEL) pad.
 //
-// On boot, reads the active RAM slot and sets a NeoPixel to a colour
-// from a fixed palette, then falls through to the standard RBCP loop.
+// On boot the LED is set off; thereafter each kernal switch sets the NeoPixel
+// to a colour from a fixed palette, then control falls through to the standard
+// RBCP loop.
 //
-// NeoPixel wiring:
-//   DIN  -> One ROM bank select pad A (GPIO24)
-//   VDD  -> One ROM J1 (3.3V)
-//   GND  -> One ROM J2 or bank select GND pad
+// NeoPixel wiring (One ROM Fire 24 E):
+//   DIN  -> a bank-select SEL pad. The SEL pads are free for output once the
+//           firmware has read the image-select jumpers at boot. On this board
+//           SEL0 = GPIO25 and SEL1 = GPIO24; this code drives BOTH (see below).
+//   VDD  -> One ROM J1 (3.3V) for an SK6812, or 5V for a WS2812B
+//   GND  -> One ROM J2 / bank-select GND pad (common ground required)
 //
-// Use an SK6812 NeoPixel powered from 3.3V - no level shifter required.
-// If using a WS2812B on 5V, add a 74AHCT125 level shifter on the data line.
+// Use an SK6812 powered from 3.3V - no level shifter required. For a WS2812B on
+// 5V, add a 74AHCT125 level shifter on the data line (AHCT for the TTL input
+// threshold). NOTE: this particular LED uses RGB byte order, not the usual GRB.
+//
+// KNOWN LIMITATION: the colour is bit-banged by the CPU and is corrupted when
+// the C64 is actively hammering the ROM bus (bus contention stretches the
+// pulse timing). It is correct with the host idle; under load colours come out
+// hue-shifted/washed-out. A fully robust fix needs hardware-timed (PIO) output,
+// which is not achievable from a plugin on this firmware. See the repo README
+// for the full investigation.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -46,15 +57,28 @@ ORA_DEFINE_USER_PLUGIN(
 // NeoPixel / GPIO definitions
 // ---------------------------------------------------------------------------
 
-#define NEOPIXEL_PIN        24u     // Bank select pad A
+// The NeoPixel data line is wired to a bank-select ("SEL") pad, which is free
+// for use once the firmware has read the image-select jumpers at boot. On the
+// Fire 24 E the SEL pads are GPIO25 (SEL0) and GPIO24 (SEL1). We were not able
+// to pin down which physical pad the data wire lands on, so we drive BOTH and
+// leave the unused one harmlessly toggling - both are < 32 so they share the
+// low SIO bank and can be driven from one mask. If you confirm your pad, you
+// can drop the other and keep a single pin.
+#define NEOPIXEL_PIN        24u     // SEL1
+#define NEOPIXEL_PIN_ALT    25u     // SEL0
 
 #define FUNCSEL_SIO         5u
 
-// WS2812/SK6812 pulse widths in nanoseconds
-#define T0H_NS  350u
+// WS2812/SK6812 pulse widths in nanoseconds.
+// T0H is deliberately short and T1H clearly long to maximise the gap between
+// a "0" and "1" high-time. Phase-locked bus contention from ROM serving can
+// stretch a high pulse by tens of ns; the wide margin keeps a stretched "0"
+// well below the ~half-way decision threshold so it doesn't read as a "1"
+// (which showed up as washed-out / desaturated colours).
+#define T0H_NS  250u
 #define T0L_NS  800u
-#define T1H_NS  700u
-#define T1L_NS  600u
+#define T1H_NS  800u
+#define T1L_NS  450u
 #define RST_US   60u
 
 // ---------------------------------------------------------------------------
@@ -125,22 +149,28 @@ static inline void np_delay_cycles(uint32_t cycles) {
     );
 }
 
+// CRITICAL: the bit-bang must touch NO SRAM. Under host load the One ROM's
+// ROM-serving DMA saturates the SRAM bus; any stack access (a function call)
+// or static reload mid-pulse stalls the CPU and stretches the bit, scrambling
+// the colour. (Confirmed: perfect with the host powered off, corrupt with it
+// running.) So preload the pin mask and timings into locals (registers),
+// inline the per-bit code, and use only register ops + SIO peripheral writes
+// inside the loop - then the serving DMA can pound SRAM without stalling us.
+//
+// This LED uses RGB byte order, MSB first (not the usual WS2812 GRB).
 __attribute__((noinline))
-static void np_send_bit(uint32_t bit) {
-    if (bit) {
-        SIO_GPIO_OUT_SET = s_np_pin_mask; np_delay_cycles(s_t1h);
-        SIO_GPIO_OUT_CLR = s_np_pin_mask; np_delay_cycles(s_t1l);
-    } else {
-        SIO_GPIO_OUT_SET = s_np_pin_mask; np_delay_cycles(s_t0h);
-        SIO_GPIO_OUT_CLR = s_np_pin_mask; np_delay_cycles(s_t0l);
-    }
-}
-
-// WS2812/SK6812 expects GRB order, MSB first
 static void np_send_pixel(uint8_t r, uint8_t g, uint8_t b) {
-    uint32_t grb = ((uint32_t)g << 16) | ((uint32_t)r << 8) | b;
+    const uint32_t mask = s_np_pin_mask;
+    const uint32_t t0h = s_t0h, t0l = s_t0l, t1h = s_t1h, t1l = s_t1l;
+    uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
     for (int i = 23; i >= 0; i--) {
-        np_send_bit((grb >> i) & 1u);
+        if ((rgb >> i) & 1u) {
+            SIO_GPIO_OUT_SET = mask; np_delay_cycles(t1h);
+            SIO_GPIO_OUT_CLR = mask; np_delay_cycles(t1l);
+        } else {
+            SIO_GPIO_OUT_SET = mask; np_delay_cycles(t0h);
+            SIO_GPIO_OUT_CLR = mask; np_delay_cycles(t0l);
+        }
     }
 }
 
@@ -160,17 +190,20 @@ static void neopixel_init(uint32_t sysclk_mhz) {
     s_t1l = (T1L_NS * sysclk_mhz) / 1000u;
     s_rst = RST_US * sysclk_mhz;
 
-    s_np_pin_mask = 1u << NEOPIXEL_PIN;
+    // Mask covers both candidate SEL pads (GPIO24 + GPIO25); see the pin
+    // definitions above. Both are < 32 so they share the low SIO_GPIO_OUT_SET/
+    // CLR bank and toggle together from a single mask.
+    s_np_pin_mask = (1u << NEOPIXEL_PIN) | (1u << NEOPIXEL_PIN_ALT);
 
-    // Configure GPIO24 pad: SIO function, 8mA drive, fast slew.
-    // The pin is driven as a permanent output, idle LOW. A WS2812/SK6812
-    // DIN must be held at a defined level between updates - if the line is
-    // left floating (e.g. by tri-stating this pin) it drifts to the input
-    // threshold of the 74AHCT125 level shifter (~1.5V), whose output then
-    // oscillates and feeds noise to the LED, causing flicker. Holding the
-    // pin low keeps the shifter output low so the LED holds its colour.
-    GPIO_PAD(NEOPIXEL_PIN) = PAD_DRIVE(PAD_DRIVE_8MA) | PAD_SLEW_FAST;
-    GPIO_CTRL(NEOPIXEL_PIN) = FUNCSEL_SIO;
+    // Configure both pads: SIO function, 8mA drive, fast slew. Driven as a
+    // permanent output, idle LOW. A WS2812/SK6812 DIN must be held at a
+    // defined level between updates - if left floating it drifts to the
+    // 74AHCT125 input threshold (~1.5V), whose output oscillates and feeds
+    // noise to the LED, causing flicker. Holding the pin low fixes that.
+    GPIO_PAD(NEOPIXEL_PIN)     = PAD_DRIVE(PAD_DRIVE_8MA) | PAD_SLEW_FAST;
+    GPIO_CTRL(NEOPIXEL_PIN)    = FUNCSEL_SIO;
+    GPIO_PAD(NEOPIXEL_PIN_ALT) = PAD_DRIVE(PAD_DRIVE_8MA) | PAD_SLEW_FAST;
+    GPIO_CTRL(NEOPIXEL_PIN_ALT) = FUNCSEL_SIO;
     SIO_GPIO_OUT_CLR = s_np_pin_mask;
     SIO_GPIO_OE_SET  = s_np_pin_mask;
 }
@@ -192,9 +225,24 @@ static void neopixel_show_flash_slot(uint8_t flash_slot) {
     // The pin is already a permanent output (see neopixel_init); keep it
     // driven throughout and leave it idle LOW afterwards so the level
     // shifter input has a defined level and the NeoPixel holds its colour.
+    //
+    // The 24-bit transmission is cycle-timed and must NOT be interrupted -
+    // we send the colour only once per slot switch, so a single stretched
+    // bit (e.g. from a USB ISR in the system plugin) latches the wrong
+    // colour permanently. Disable interrupts for the ~30us transmission so
+    // the WS2812 timing is exact. The reset/latch pulses are just long LOW
+    // periods and are interrupt-tolerant, so they stay outside the critical
+    // section to keep IRQs off for as short a time as possible.
     SIO_GPIO_OUT_CLR = s_np_pin_mask;
     np_reset();
+    // Disable this core's interrupts for the cycle-timed transmission so a USB
+    // (or other) ISR can't stretch a bit. The register-only np_send_pixel (see
+    // above) handles the cross-core DMA contention; together they give clean
+    // timing under host load. The reset/latch pulses are interrupt-tolerant
+    // long LOWs, so they stay outside the critical section.
+    __asm volatile ("cpsid i" ::: "memory");   // IRQs off
     np_send_pixel(r, g, b);
+    __asm volatile ("cpsie i" ::: "memory");   // IRQs on
     np_reset();                       // latch the colour
     SIO_GPIO_OUT_CLR = s_np_pin_mask; // idle low - hold the line stable
 }
