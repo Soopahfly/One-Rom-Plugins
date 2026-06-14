@@ -10,24 +10,24 @@ switches kernals normally with the plugin installed.
 
 ## Status
 
-**Working for normal use.** Flicker is fixed, **stock shows red**, and colours
-are **steady and distinct per ROM**.
+**Working as intended.** Flicker is fixed, the stock kernal shows red, the boot
+menu/power state shows steady white, and the selected kernal colours are stable
+and distinct.
 
-There is **one residual limitation**: while the C64 is hammering the ROM bus,
-the CPU-bit-banged colour can be slightly hue-shifted on a couple of slots. It is
-correct with the host idle, and **a power cycle always shows the true colour**.
-Best results with **USB unplugged** (i.e. normal C64 use — USB is only needed for
-programming). Full reasoning in [The investigation](#the-investigation).
+The key fix for the remaining hue-shift problem was moving the timing-critical
+NeoPixel sender into `.ramfunc`, so the 24-bit waveform runs from SRAM instead
+of shared XIP flash. This avoids stalls from the system plugin running on the
+other core while the user plugin bit-bangs the LED.
 
-| Kernal slot | Colour |
-|---|---|
-| bootloader / menu | off |
-| stock 901227-03 | 🔴 red |
-| JiffyDOS | 🟠 orange |
-| JaffyDOS | 🟡 yellow |
-| EXOS | 🟢 green |
-| jiffy_dolphin | 🩵 cyan |
-| destest | 🔵 blue |
+| Flash slot | Meaning | LED colour |
+|---|---|---|
+| 0 | bootloader / menu / power indicator | white |
+| 1 | stock 901227-03 | red |
+| 2 | JiffyDOS | orange |
+| 3 | JaffyDOS | yellow |
+| 4 | EXOS | green |
+| 5 | jiffy_dolphin | cyan |
+| 6 | destest | blue |
 
 ## Wiring
 
@@ -37,33 +37,34 @@ the Fire 24 E: **SEL0 = GPIO25, SEL1 = GPIO24**.
 
 | NeoPixel | One ROM |
 |----------|---------|
-| DIN | a SEL pad — the plugin drives **both GPIO24 and GPIO25** (see note) |
+| DIN | a SEL pad; this plugin drives both GPIO24 and GPIO25 |
 | VDD | J1 (3.3V) for an SK6812, or 5V for a WS2812B |
-| GND | J2 / bank-select GND pad — **common ground is required** |
+| GND | J2 / bank-select GND pad; common ground is required |
 
-- **SK6812 @ 3.3V** needs no level shifter.
-- **WS2812B @ 5V** (≈4.3V after the on-board protection diode — fine) needs a
-  **74AHCT125** level shifter. AHCT specifically: its TTL input threshold
-  recognises the 3.3V GPIO as a logic high.
-- **Byte order:** this LED is **RGB**, not the usual WS2812 **GRB**. The driver
-  sends RGB. If red/green are swapped on your pixel, flip the order in
-  `np_send_pixel()`.
-- **Why both pins?** We couldn't definitively confirm which SEL pad the data wire
-  lands on, so the driver drives both; the unused one toggles harmlessly. Confirm
-  yours and you can drop to a single `NEOPIXEL_PIN`.
+- **SK6812 at 3.3V** needs no level shifter.
+- **WS2812B at 5V** needs a 74AHCT125 level shifter on the data line.
+- **Byte order:** this LED is RGB, not the usual WS2812 GRB. If red/green are
+  swapped on your pixel, change the packing in `np_send_pixel()`.
+- **Why both pins?** During bring-up we could not definitively confirm which SEL
+  pad the data wire landed on, so the driver drives both. The unused one toggles
+  harmlessly. If you confirm your pad, you can drop to a single pin.
 
 ## Brightness
 
-`#define NP_BRIGHTNESS` (0–255) in `host_control_rgb_main.c` scales all colours.
-Default `32` (~12%). The raw pixel is very bright; lower values are also slightly
-kinder to the hue (shorter 1-bit runs → less cross-channel bleed under load).
+`#define NP_BRIGHTNESS` in `host_control_rgb_main.c` scales all colours.
+Default is `32`, roughly 12% brightness. This keeps the replacement power LED
+comfortable and also reduces visible colour bleed.
 
 ## Build & flash
 
+Build against the One ROM SDK host-control plugin harness:
+
 ```bash
 cd plugins/user/host-control
-make                       # -> build/host_control_plugin.bin
+make
 ```
+
+Flash with this plugin binary by file:
 
 ```bash
 onerom program \
@@ -71,72 +72,50 @@ onerom program \
   --plugin file=host_control_plugin.bin \
   --slot file=c64_bootloader.bin,type=2364,cs1=active_low \
   --slot file=901227-03.rom,type=2364,cs1=active_low \
-  ... (further kernal slots, in palette order) ...
+  --slot file=JiffyDOS_C64_6.01.bin,type=2364,cs1=active_low \
+  --slot file=jaffydos.bin,type=2364,cs1=active_low \
+  --slot file=EXOS_V3.rom,type=2364,cs1=active_low \
+  --slot file=jiffy_dolphin.bin,type=2364,cs1=active_low \
+  --slot file=destest-kernal.rom,type=2364,cs1=active_low \
+  --yes
 ```
 
-> Use `--plugin file=...`. `--plugin host-control` by name pulls the **stock**
-> RBCP plugin from the manifest, which has **no LED support**.
+Use `--plugin file=...`. `--plugin host-control` by name pulls the stock RBCP
+plugin from the manifest, which has no LED support.
 
 The palette is indexed by **flash slot excluding plugins**
-(`ORA_FLASH_SLOT_FLAG_EXCLUDE_PLUGINS`): slot 0 = bootloader (off), slot 1 =
-first kernal (red), etc. — see the table in `host_control_rgb_main.c`.
+(`ORA_FLASH_SLOT_FLAG_EXCLUDE_PLUGINS`): slot 0 is the bootloader/menu, slot 1
+is the first kernal, and so on.
 
-## Usage notes
+## Investigation notes
 
-- **Run with USB unplugged** for the best colours (USB-stack interrupts are the
-  biggest corruptor — see below). The One ROM is powered through the ROM socket.
-- **A power cycle always shows the true colour** for every slot.
-- Brief colour tint right after a menu selection on some slots is the residual
-  bus-contention artifact; it does not affect which kernal boots.
+This started as an LED flicker problem and became a timing investigation. The
+important findings:
 
----
+| Problem | Cause | Fix |
+|---|---|---|
+| LED flickered and never held colour | GPIO was left floating between updates; the level shifter input sat near its threshold | Keep the pin as a permanent output and idle it low |
+| No colour on the wired pad | The data wire/pad mapping was uncertain | Drive both SEL pads, GPIO24 and GPIO25 |
+| Red appeared as green | The LED used RGB byte order, not GRB | Send RGB order |
+| Colours were hue-shifted under real use | CPU bit-bang fetched instructions from shared XIP flash while the other core/system plugin could also execute from flash | Put `np_send_pixel()` in `.ramfunc` and copy it to SRAM at startup |
+| LED was too bright | Raw NeoPixel output is excessive as a power LED | Add `NP_BRIGHTNESS` scaling |
+| Boot menu needed a visible power state | Slot 0 was originally off | Use steady white for flash slot 0 |
 
-## The investigation
+Things deliberately not kept:
 
-This began as "the LED flickers instead of changing colour" and became a deep
-hardware/firmware dig. Recorded in full so it isn't lost.
+- A smooth boot-menu colour cycle was tested, but custom polling of the RBCP
+  ring buffer made the final colour nondeterministic during boot handoff. The
+  stable version uses the firmware's blocking `wait_for_knock()` path and a
+  steady white boot/menu colour.
+- PIO output would still be the most robust architectural solution, but it is
+  not safely claimable from this user plugin because the firmware owns dynamic
+  PIO allocation.
 
-### Fixed along the way
-| # | Problem | Cause | Fix | Outcome |
-|---|---------|-------|-----|---------|
-| 1 | Flicker, never holds a colour | Pin tri-stated between updates; floating pad sat at ~1.5 V, right on the 74AHCT125 input threshold → shifter output oscillated | Drive the pin as a permanent output, idle **LOW** | ✅ Flicker gone |
-| 2 | No stable colour; wired pad read ~1.5 V even when "driven" | Code drove GPIO24, but the data wire wasn't on the pin being driven; on Fire 24 E every GPIO is allocated except the SEL pads (24/25) | Drive **both** GPIO24 and GPIO25 | ✅ LED lit, steady |
-| 3 | "Red" showed as green | LED is **RGB** order; code sent **GRB** | Send RGB order | ✅ Primaries correct in isolation |
-| 4 | Colours scrambled under load | The per-bit `noinline` call + static reloads hit SRAM, which the ROM-serving DMA saturates → stretched bits | Rewrite bit-bang to be **register-only** (no SRAM in the timing loop) | ✅ Big improvement (some colours became correct) |
-| 5 | LED far too bright | — | `NP_BRIGHTNESS` scale | ✅ Dimmable; also reduces colour bleed |
+## Final behaviour
 
-### Decisive diagnostics
-- **Host powered OFF → perfect** red/green/blue/white. The bit-bang itself is
-  flawless; the corruption is purely load-induced.
-- **Force pure red for every update** → still came out orangy / white-in-menu.
-  Proved it's **transmission corruption**, not the palette/mapping or byte order.
-- **USB unplugged → stock is red, colours solid and distinct.** Proved
-  **USB-plugin interrupts are the dominant corruptor.**
-- **Menu-select tinted, but a power cycle shows the true colour.** Proved the
-  *value* is right — it's the *moment* of transmission (bus activity) that's bad.
-
-### Things tried that did **not** work (and why)
-| Approach | Result | Why |
-|----------|--------|-----|
-| `cpsid` (disable interrupts) | No effect | Plugin runs **unprivileged**; `cpsid` is silently ignored |
-| Firmware `ora_enable_irq` to mask USB IRQ | **Firmware panic** | Unprivileged plugin writing the NVIC faults |
-| Exclusive mode (pause other core) | **Broke RBCP** | Can't pause the serving core mid-bus-cycle |
-| Pause the RBCP address monitor (PIO0) during TX | No real change | The monitor isn't the main corruptor |
-| Widen 0/1 pulse-timing margin | No change | Corruption isn't a threshold-margin issue |
-| RAM-resident bit-bang | Abandoned | Would move code into the *contended* SRAM (wrong direction); flash/XIP is the uncontended path |
-| PIO (hardware-timed) output | Not feasible from a plugin | All 3 PIO blocks dynamically allocated (PIO1 addr, PIO2 data, **PIO0 = the RBCP monitor**); no statically-free instruction space; no `apio` access |
-| Re-send the colour after the session settles | Couldn't thread it | Too short = still tinted; long enough = **breaks RBCP** (the bootloader switches during menu navigation) |
-
-### Root cause & conclusion
-The colour is **bit-banged by the CPU**, and the timing is corrupted whenever
-something preempts the CPU / saturates the bus during the ~30 µs transmission —
-dominantly **USB-plugin interrupts**, with a milder residual from **ROM-serving
-bus contention**. A plugin has **no lever** to stop either: it runs unprivileged
-(so no interrupt masking, by any route), and it cannot claim a PIO state machine
-(so no hardware timing). The only fully robust fix is **PIO output from inside a
-custom One ROM firmware build**, where PIO allocation is owned and can be reserved
-at init.
-
-For real-world C64 use (USB unplugged) the indicator works: flicker-free, stock
-red, steady distinct per-kernal colours, with a power cycle showing the exact
-hue.
+- Bootloader/menu/power state: steady white.
+- Stock kernal: red.
+- Other kernals: palette colours by flash slot.
+- NeoPixel waveform: sent from SRAM via `.ramfunc`.
+- RBCP command handling: original blocking firmware knock wait, no custom ring
+  polling.

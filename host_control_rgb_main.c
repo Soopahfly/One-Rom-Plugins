@@ -102,7 +102,7 @@ ORA_DEFINE_USER_PLUGIN(
 // just whichever scratch buffer the bootloader loaded it into.
 //
 // Flash slot numbering (excluding plugins) on this setup:
-//   0 = c64_bootloader  (LED off while bootloader ROM is being served)
+//   0 = c64_bootloader  (boot menu / power indicator)
 //   1 = stock 901227-03 (red, per requirement)
 //   2 = JiffyDOS
 //   3 = JaffyDOS
@@ -115,7 +115,7 @@ ORA_DEFINE_USER_PLUGIN(
 #define FLASH_SLOT_UNKNOWN 0xFFu
 
 static const uint8_t s_palette[PALETTE_SIZE][3] = {
-    {  0,   0,   0},   // Flash 0  - Bootloader: off
+    {255, 255, 255},   // Flash 0  - Bootloader/menu: white power indicator
     {255,   0,   0},   // Flash 1  - Red (stock)
     {255, 128,   0},   // Flash 2  - Orange
     {255, 255,   0},   // Flash 3  - Yellow
@@ -162,7 +162,7 @@ static uint8_t s_ram_to_flash[MAX_RAM_SLOTS];
 static uint32_t s_np_pin_mask;
 static uint32_t s_t0h, s_t0l, s_t1h, s_t1l, s_rst;
 
-static inline void np_delay_cycles(uint32_t cycles) {
+static inline __attribute__((always_inline)) void np_delay_cycles(uint32_t cycles) {
     uint32_t n = cycles / 3u;
     __asm volatile (
         "1: subs %0, %0, #1\n"
@@ -171,16 +171,16 @@ static inline void np_delay_cycles(uint32_t cycles) {
     );
 }
 
-// CRITICAL: the bit-bang must touch NO SRAM. Under host load the One ROM's
-// ROM-serving DMA saturates the SRAM bus; any stack access (a function call)
-// or static reload mid-pulse stalls the CPU and stretches the bit, scrambling
-// the colour. (Confirmed: perfect with the host powered off, corrupt with it
-// running.) So preload the pin mask and timings into locals (registers),
-// inline the per-bit code, and use only register ops + SIO peripheral writes
-// inside the loop - then the serving DMA can pound SRAM without stalling us.
+// CRITICAL: the bit-bang must avoid shared-XIP instruction fetches. The user
+// plugin runs on core 0 while the system USB plugin runs on core 1; even with
+// no USB cable attached, core 1 can still execute its task loop from the same
+// XIP flash. A flash fetch stall in the middle of a WS2812/SK6812 bit stretches
+// the pulse and latches the wrong colour. Keep this sender in .ramfunc, preload
+// the pin mask and timings into registers, inline the delay loop, and use only
+// register ops + SIO peripheral writes inside the per-bit loop.
 //
 // This LED uses RGB byte order, MSB first (not the usual WS2812 GRB).
-__attribute__((noinline))
+__attribute__((section(".ramfunc"), noinline, aligned(4)))
 static void np_send_pixel(uint8_t r, uint8_t g, uint8_t b) {
     const uint32_t mask = s_np_pin_mask;
     const uint32_t t0h = s_t0h, t0l = s_t0l, t1h = s_t1h, t1l = s_t1l;
@@ -194,6 +194,22 @@ static void np_send_pixel(uint8_t r, uint8_t g, uint8_t b) {
             SIO_GPIO_OUT_CLR = mask; np_delay_cycles(t0l);
         }
     }
+}
+
+static void plugin_copy_ramfuncs(void) {
+    extern uint32_t __ramfunc_start;
+    extern uint32_t __ramfunc_end;
+    extern uint32_t __ramfunc_load;
+
+    uint32_t *src = &__ramfunc_load;
+    uint32_t *dst = &__ramfunc_start;
+    while (dst < &__ramfunc_end) {
+        *dst++ = *src++;
+    }
+
+    // Ensure the freshly copied SRAM instructions are visible before the
+    // first branch into .ramfunc.
+    __asm volatile ("dsb sy\nisb sy" ::: "memory");
 }
 
 static void np_reset(void) {
@@ -230,20 +246,7 @@ static void neopixel_init(uint32_t sysclk_mhz) {
     SIO_GPIO_OE_SET  = s_np_pin_mask;
 }
 
-static void neopixel_show_flash_slot(uint8_t flash_slot) {
-    uint8_t r, g, b;
-    if (flash_slot == FLASH_SLOT_UNKNOWN) {
-        // RAM slot with no recorded flash origin - dim white so it's
-        // visibly "something unexpected" rather than dark or a wrong colour
-        r = 16; g = 16; b = 16;
-    } else if (flash_slot < PALETTE_SIZE) {
-        r = s_palette[flash_slot][0];
-        g = s_palette[flash_slot][1];
-        b = s_palette[flash_slot][2];
-    } else {
-        r = 16; g = 16; b = 16;
-    }
-
+static void neopixel_show_rgb(uint8_t r, uint8_t g, uint8_t b) {
     // Scale to the configured brightness (also shortens 1-bit runs, reducing
     // colour bleed under load). >>8 is a fast divide-by-256 (~/255).
     r = (uint8_t)(((uint32_t)r * NP_BRIGHTNESS) >> 8);
@@ -282,6 +285,22 @@ static void neopixel_show_flash_slot(uint8_t flash_slot) {
     SIO_GPIO_OUT_CLR = s_np_pin_mask; // idle low - hold the line stable
 }
 
+static void neopixel_show_flash_slot(uint8_t flash_slot) {
+    uint8_t r, g, b;
+    if (flash_slot == FLASH_SLOT_UNKNOWN) {
+        // RAM slot with no recorded flash origin - dim white so it's
+        // visibly "something unexpected" rather than dark or a wrong colour
+        r = 16; g = 16; b = 16;
+    } else if (flash_slot < PALETTE_SIZE) {
+        r = s_palette[flash_slot][0];
+        g = s_palette[flash_slot][1];
+        b = s_palette[flash_slot][2];
+    } else {
+        r = 16; g = 16; b = 16;
+    }
+    neopixel_show_rgb(r, g, b);
+}
+
 // Translate a RAM slot to its last-loaded flash slot and show that colour
 static void neopixel_show_ram_slot(uint8_t ram_slot) {
     uint8_t flash = (ram_slot < MAX_RAM_SLOTS)
@@ -294,7 +313,7 @@ static void neopixel_show_ram_slot(uint8_t ram_slot) {
 // Everything below here is the original host-control RBCP plugin, unmodified
 // ---------------------------------------------------------------------------
 
-#define RING_ENTRIES_LOG2   6u
+#define RING_ENTRIES_LOG2   5u   // 32 entries; frees RAM for the .ramfunc sender
 #define RING_DATA_SIZE      32u
 #define RING_MASK           ((1u << RING_ENTRIES_LOG2) - 1u)
 #define RING_BUF_TYPE       uint32_t
@@ -1043,6 +1062,11 @@ void rbcp_main(
     (void)plugin_type;
     (void)entry_args;
 
+    // The NeoPixel waveform sender is linked into .ramfunc so instruction
+    // fetches during the timing-critical 24-bit transfer come from SRAM, not
+    // shared XIP flash. Copy it before the first LED update.
+    plugin_copy_ramfuncs();
+
     // --- NeoPixel init ---
     ora_get_sysclk_mhz_fn_t get_sysclk = ora_lookup_fn(ORA_ID_GET_SYSCLK_MHZ);
     uint32_t mhz = get_sysclk();
@@ -1056,7 +1080,8 @@ void rbcp_main(
     }
     s_ram_to_flash[0] = 0u;
 
-    // At boot the bootloader ROM is being served: LED off (palette entry 0).
+    // At boot the bootloader ROM is being served: show the boot-menu/power
+    // indicator colour (palette entry 0).
     // The bootloader will shortly LOAD/SWITCH to the saved kernal, which
     // updates the LED via the RBCP command hooks.
     neopixel_show_flash_slot(0u);
