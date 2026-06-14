@@ -22,11 +22,18 @@
 // threshold). NOTE: this particular LED uses RGB byte order, not the usual GRB.
 //
 // KNOWN LIMITATION: the colour is bit-banged by the CPU and is corrupted when
-// the C64 is actively hammering the ROM bus (bus contention stretches the
-// pulse timing). It is correct with the host idle; under load colours come out
-// hue-shifted/washed-out. A fully robust fix needs hardware-timed (PIO) output,
-// which is not achievable from a plugin on this firmware. See the repo README
-// for the full investigation.
+// something else is hammering the bus / preempting the CPU during the ~30us
+// transmission. It is correct with the host idle. The two corruptors are:
+//   1. USB-plugin interrupts - dominant. Worst with USB connected (programming).
+//      Cannot be masked: the plugin runs UNPRIVILEGED, so cpsid is ignored and
+//      calling the firmware's ora_enable_irq faults. So: best results with USB
+//      UNPLUGGED, which is normal C64 use.
+//   2. ROM-serving bus contention - milder residual, present even without USB.
+// A fully robust fix needs hardware-timed (PIO) output, which is not achievable
+// from a plugin here (all PIO blocks are dynamically allocated by the firmware).
+// In practice: stock = red and colours are steady/distinct in normal use; a
+// power cycle always shows the true colour. See the repo README for the full
+// investigation and everything that was tried. Brightness: NP_BRIGHTNESS below.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -80,6 +87,12 @@ ORA_DEFINE_USER_PLUGIN(
 #define T1H_NS  800u
 #define T1L_NS  450u
 #define RST_US   60u
+
+// Global brightness scale, 0-255 (255 = full). The raw WS2812 is very bright;
+// scaling the palette values down also shortens the runs of 1-bits, which
+// reduces the cross-channel colour bleed seen under ROM-serving bus load.
+// Tune to taste; 64 ≈ 25%.
+#define NP_BRIGHTNESS  32u
 
 // ---------------------------------------------------------------------------
 // Slot-to-colour palette
@@ -136,6 +149,15 @@ static uint8_t s_ram_to_flash[MAX_RAM_SLOTS];
 // ---------------------------------------------------------------------------
 // NeoPixel driver - static state
 // ---------------------------------------------------------------------------
+
+// The RBCP address monitor runs on PIO0 SM0 (CS monitor) + SM1 (address read)
+// - BLOCK_MONITOR in the firmware. Its PIO+DMA traffic on every C64 bus access
+// is the suspected source of the bit-bang corruption under load. We pause just
+// these two SMs for the cycle-timed transmission. PIO0 hosts only the monitor
+// (ROM serving is on PIO1/PIO2), so this can never disturb ROM serving.
+#define PIO0_BASE           0x50200000u
+#define PIO0_CTRL           (*(volatile uint32_t *)(PIO0_BASE + 0x000u))
+#define MONITOR_SM_MASK     0x3u   // SM0 | SM1 enable bits
 
 static uint32_t s_np_pin_mask;
 static uint32_t s_t0h, s_t0l, s_t1h, s_t1l, s_rst;
@@ -222,6 +244,12 @@ static void neopixel_show_flash_slot(uint8_t flash_slot) {
         r = 16; g = 16; b = 16;
     }
 
+    // Scale to the configured brightness (also shortens 1-bit runs, reducing
+    // colour bleed under load). >>8 is a fast divide-by-256 (~/255).
+    r = (uint8_t)(((uint32_t)r * NP_BRIGHTNESS) >> 8);
+    g = (uint8_t)(((uint32_t)g * NP_BRIGHTNESS) >> 8);
+    b = (uint8_t)(((uint32_t)b * NP_BRIGHTNESS) >> 8);
+
     // The pin is already a permanent output (see neopixel_init); keep it
     // driven throughout and leave it idle LOW afterwards so the level
     // shifter input has a defined level and the NeoPixel holds its colour.
@@ -235,14 +263,21 @@ static void neopixel_show_flash_slot(uint8_t flash_slot) {
     // section to keep IRQs off for as short a time as possible.
     SIO_GPIO_OUT_CLR = s_np_pin_mask;
     np_reset();
-    // Disable this core's interrupts for the cycle-timed transmission so a USB
-    // (or other) ISR can't stretch a bit. The register-only np_send_pixel (see
-    // above) handles the cross-core DMA contention; together they give clean
-    // timing under host load. The reset/latch pulses are interrupt-tolerant
-    // long LOWs, so they stay outside the critical section.
-    __asm volatile ("cpsid i" ::: "memory");   // IRQs off
+    // For the cycle-timed transmission, quiet everything that competes for the
+    // bus / CPU: disable this core's interrupts AND pause the RBCP address
+    // monitor's PIO state machines (its per-bus-cycle PIO+DMA traffic is the
+    // suspected cause of colour corruption under host load - the stock rgb
+    // plugin, which runs no monitor, bit-bangs cleanly). The monitor is paused
+    // only for ~30us, during which the bootloader is blocked waiting on command
+    // completion, so no RBCP bytes are missed. PIO0 = monitor only, so ROM
+    // serving is never touched. At boot the monitor isn't running yet, so the
+    // saved enable bits are 0 and this is a no-op.
+    uint32_t pio0_ctrl = PIO0_CTRL;
+    PIO0_CTRL = pio0_ctrl & ~MONITOR_SM_MASK;   // pause monitor SMs
+    __asm volatile ("cpsid i" ::: "memory");    // IRQs off
     np_send_pixel(r, g, b);
-    __asm volatile ("cpsie i" ::: "memory");   // IRQs on
+    __asm volatile ("cpsie i" ::: "memory");    // IRQs on
+    PIO0_CTRL = pio0_ctrl;                       // resume monitor SMs
     np_reset();                       // latch the colour
     SIO_GPIO_OUT_CLR = s_np_pin_mask; // idle low - hold the line stable
 }
