@@ -56,16 +56,48 @@ the Fire 24 E: **SEL0 = GPIO25, SEL1 = GPIO24**.
 Default is `32`, roughly 12% brightness. This keeps the replacement power LED
 comfortable and also reduces visible colour bleed.
 
-## Build & flash
+## Build & flash from a One ROM checkout
 
-Build against the One ROM SDK host-control plugin harness:
+This file is a drop-in replacement for the One ROM user `host-control` plugin
+source. Build it with the One ROM plugin Makefile rather than as a standalone C
+file.
+
+Prerequisites:
+
+- A local checkout of the One ROM repository.
+- The ARM embedded GCC toolchain available as `arm-none-eabi-gcc`.
+- The `onerom` CLI for programming the device.
+
+Copy the source into the One ROM tree:
+
+```bash
+cd /path/to/One-ROM
+cp /path/to/One-Rom-Plugins/host_control_rgb_main.c \
+  plugins/user/host-control/src/host_control_main.c
+```
+
+Build the user plugin:
 
 ```bash
 cd plugins/user/host-control
 make
 ```
 
-Flash with this plugin binary by file:
+The output is:
+
+```text
+plugins/user/host-control/build/host_control_plugin.bin
+```
+
+Copy that binary somewhere convenient for programming, usually alongside your
+ROM images:
+
+```bash
+cp build/host_control_plugin.bin /path/to/programming-folder/
+```
+
+Flash with this plugin binary by file. The `usb` system plugin must come first,
+then this host-control user plugin, then the bootloader and kernal slots:
 
 ```bash
 onerom program \
@@ -87,6 +119,20 @@ plugin from the manifest, which has no LED support.
 The palette is indexed by **flash slot excluding plugins**
 (`ORA_FLASH_SLOT_FLAG_EXCLUDE_PLUGINS`): slot 0 is the bootloader/menu, slot 1
 is the first kernal, and so on.
+
+## Customising for your setup
+
+- **More kernals:** add more `--slot file=...` entries after your existing
+  kernals. The LED colour follows the flash slot order. The palette currently
+  covers slots 0-21; beyond that, the fallback colour is dim white.
+- **Different slot colours:** edit `s_palette` in `host_control_rgb_main.c`.
+  Slot 0 is the bootloader/menu/power colour.
+- **Different SEL pad:** edit `NEOPIXEL_PIN` and `NEOPIXEL_PIN_ALT`. This build
+  drives both GPIO24 and GPIO25 for Fire 24 E bring-up convenience.
+- **Different LED byte order:** edit the `rgb` packing in `np_send_pixel()` if
+  your LED expects GRB instead of RGB.
+- **Brightness:** edit `NP_BRIGHTNESS`; `32` is intentionally dim for use as a
+  replacement power LED.
 
 ## Investigation notes
 
