@@ -1,5 +1,59 @@
 # One-Rom-Plugins
 
+## Current version: One ROM 0.8.0
+
+The updated source is **[v080/host_control_rgb_main.c](v080/host_control_rgb_main.c)**.
+It extends upstream host-control 0.1.6 (RBCP 0.1.3) for the existing Fire 24 E,
+RP2350, 2MB C64 setup. Firmware is pinned to 0.8.0 and USB plugin to 0.3.2.
+
+The C64 menu was updated to [r107sl's bootloader 0.1.2](https://github.com/r107sl/c64-bootloader).
+ROMs have separate friendly labels, so paths and extensions do not appear in
+the menu. The menu itself remains unmodified and has no colour markers.
+
+| Menu entry | Power LED |
+| --- | --- |
+| Boot menu | White |
+| Commodore Stock Rev 3 | Red |
+| JiffyDOS 6.01 | Orange |
+| JaffyDOS 1.3 | Magenta |
+| EXOS V3 | Green |
+| JiffyDOS + DolphinDOS | Cyan |
+| DesTest Diagnostics | Blue |
+
+The firmware/menu upgrade was programmed with readback verification, and its
+colours were reported working on real hardware. JaffyDOS was then changed from
+yellow to magenta to distinguish it from JiffyDOS orange and DesTest blue.
+The magenta variant builds successfully but has not yet been separately
+confirmed on hardware.
+
+The port retains the SRAM-based LED sender, RGB byte order, brightness and
+existing level-shifter wiring. It removes hard-coded PIO state-machine control,
+tracks up to 64 C64 RAM slots, and keeps upstream's static-memory limit intact.
+The capture ring has 16 entries; this is a C64 8KB 2364 build, not a generic
+replacement for all One ROM targets.
+
+### Source and build files
+
+- [v080/README.md](v080/README.md): pinned inputs, local layout, verification,
+  limitations and rollback.
+- [port_v080.py](port_v080.py): reproduce the port from the pinned upstream tag.
+- [build_v080.ps1](build_v080.ps1): compile with ARM GNU tools on Windows.
+- [prepare_candidate_v080.ps1](prepare_candidate_v080.ps1): build a complete
+  local image with friendly labels and optional verified menu download.
+- [make_jaffy_magenta.py](make_jaffy_magenta.py): reproduce the palette-only
+  update against the verified local baseline.
+
+The preparation scripts are tailored to this programming folder and require
+the user's own ROM files and verified backup. They never flash a device.
+ROM images, complete flash dumps, generated firmware, and experimental builds
+are kept local and are not part of this repository.
+
+## Legacy 0.6.13 implementation
+
+The root `host_control_rgb_main.c` is retained as the historical input to the
+port generator. **Use `v080/host_control_rgb_main.c` for firmware 0.8.0.**
+The following notes describe the older implementation and its investigation.
+
 A modified One ROM **host-control (RBCP)** plugin that indicates which kernal is
 active on a Commodore 64 by driving a WS2812/SK6812 NeoPixel with a per-slot
 colour. The C64 bootloader's slot selection drives the LED, so you can see at a

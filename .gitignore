@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.bin
+*.elf
+*.o
+*.map
+*.su
+build-v080/
+menu-colour-markers/
+make_jaffy_purple.py
